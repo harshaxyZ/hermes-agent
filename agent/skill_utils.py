@@ -607,6 +607,13 @@ def discover_all_skill_config_vars() -> List[Dict[str, Any]]:
             continue
         for skill_file in iter_skill_index_files(skills_dir, "SKILL.md"):
             try:
+                try:
+                    from tools.skill_manager_tool import _verify_integrity
+                    if not _verify_integrity(skill_file.parent):
+                        continue
+                except Exception:
+                    pass
+
                 raw = skill_file.read_text(encoding="utf-8")
                 frontmatter, _ = parse_frontmatter(raw)
             except Exception:

@@ -1191,6 +1191,14 @@ def _parse_skill_file(skill_file: Path) -> tuple[bool, dict, str]:
     (True, {}, "") to err on the side of showing the skill.
     """
     try:
+        try:
+            from tools.skill_manager_tool import _verify_integrity
+            if not _verify_integrity(skill_file.parent):
+                logger.warning("Skill integrity verification failed for %s, skipping.", skill_file.parent)
+                return False, {}, ""
+        except Exception as e:
+            logger.debug("Failed to verify skill integrity: %s", e)
+
         raw = skill_file.read_text(encoding="utf-8")
         frontmatter, _ = parse_frontmatter(raw)
 

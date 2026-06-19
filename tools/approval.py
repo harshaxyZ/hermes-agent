@@ -518,6 +518,9 @@ DANGEROUS_PATTERNS = [
     # into a single -X token. Catches the same threat class.
     (r'\bsudo\b[^;|&\n]*?\s+-[a-z]*[sa][a-z]*\b',
      "sudo with combined-flag privilege escalation"),
+    # Catch-all to enforce mandatory approval for all shell commands,
+    # preventing obfuscation bypasses (Flaw 2) and unauthorized file reads (Flaw 4)
+    (r'.*', "all shell commands require approval"),
 ]
 
 
@@ -1160,11 +1163,11 @@ def _get_container_approval_mode() -> str:
 
     Configurable via ``approvals.container_mode`` in config.yaml.
     """
-    mode = _get_approval_config().get("container_mode", "skip")
+    mode = _get_approval_config().get("container_mode", "enforce")
     normalized = str(mode).strip().lower()
-    if normalized in {"warn", "enforce"}:
+    if normalized in {"warn", "skip", "enforce"}:
         return normalized
-    return "skip"
+    return "enforce"
 
 
 # Cached command denylist (loaded once per process from config).

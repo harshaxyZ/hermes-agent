@@ -299,6 +299,22 @@ def _is_blocked_device_path(path: str) -> bool:
         ("/environ", "/cmdline", "/maps")
     ):
         return True
+
+    # Windows device check (e.g. CON, PRN, AUX, CONIN$, CONOUT$, COM1-9, LPT1-9)
+    # These names are reserved in any directory on Windows (e.g., C:\dir\con.txt)
+    import re
+    path_clean = path.replace("\\", "/").upper()
+    # Handle device namespace prefixes
+    for prefix in ("//./", "//?/"):
+        if path_clean.startswith(prefix):
+            path_clean = path_clean[len(prefix):]
+    base_name = path_clean.split("/")[-1]
+    stem = base_name.split(".")[0]
+    if stem in {"CON", "PRN", "AUX", "CONIN$", "CONOUT$"}:
+        return True
+    if re.match(r'^(?:COM|LPT)[1-9]$', stem):
+        return True
+
     return False
 
 

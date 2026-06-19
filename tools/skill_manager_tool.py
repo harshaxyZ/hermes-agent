@@ -101,6 +101,32 @@ def _security_scan_skill(skill_dir: Path) -> Optional[str]:
         logger.warning("Security scan failed for %s: %s", skill_dir, e, exc_info=True)
     return None
 
+
+def _write_integrity_sidecar(skill_dir: Path) -> None:
+    """Compute content hash and write it to .integrity.json sidecar."""
+    from tools.skills_guard import content_hash
+    h = content_hash(skill_dir)
+    integrity_file = skill_dir / ".integrity.json"
+    _atomic_write_text(integrity_file, json.dumps({"hash": h}))
+
+
+def _verify_integrity(skill_dir: Path) -> bool:
+    """Verify that the skill's content hash matches its .integrity.json sidecar."""
+    integrity_file = skill_dir / ".integrity.json"
+    if not integrity_file.exists():
+        # Allow missing integrity file for backward compatibility
+        return True
+    try:
+        data = json.loads(integrity_file.read_text(encoding="utf-8"))
+        expected_hash = data.get("hash")
+        if not expected_hash:
+            return False
+        from tools.skills_guard import content_hash
+        actual_hash = content_hash(skill_dir)
+        return actual_hash == expected_hash
+    except Exception:
+        return False
+
 import yaml
 
 
@@ -592,6 +618,9 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     skill_md = skill_dir / "SKILL.md"
     _atomic_write_text(skill_md, content)
 
+    # Write integrity sidecar
+    _write_integrity_sidecar(skill_dir)
+
     # Security scan — roll back on block
     scan_error = _security_scan_skill(skill_dir)
     if scan_error:
@@ -638,16 +667,27 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name)}
 
+    # Verify integrity before edit
+    if not _verify_integrity(existing["path"]):
+        return {
+            "success": False,
+            "error": f"Skill integrity check failed for '{name}'. The skill contents have been modified outside of skill_manage."
+        }
+
     skill_md = existing["path"] / "SKILL.md"
     # Back up original content for rollback
     original_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else None
     _atomic_write_text(skill_md, content)
+
+    # Write new integrity sidecar
+    _write_integrity_sidecar(existing["path"])
 
     # Security scan — roll back on block
     scan_error = _security_scan_skill(existing["path"])
     if scan_error:
         if original_content is not None:
             _atomic_write_text(skill_md, original_content)
+            _write_integrity_sidecar(existing["path"])
         return {"success": False, "error": scan_error}
 
     # Extract description from new content for verbose notifications
@@ -688,6 +728,13 @@ def _patch_skill(
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name)}
+
+    # Verify integrity before patch
+    if not _verify_integrity(existing["path"]):
+        return {
+            "success": False,
+            "error": f"Skill integrity check failed for '{name}'. The skill contents have been modified outside of skill_manage."
+        }
 
     skill_dir = existing["path"]
 
@@ -750,10 +797,14 @@ def _patch_skill(
     original_content = content  # for rollback
     _atomic_write_text(target, new_content)
 
+    # Write new integrity sidecar
+    _write_integrity_sidecar(skill_dir)
+
     # Security scan — roll back on block
     scan_error = _security_scan_skill(skill_dir)
     if scan_error:
         _atomic_write_text(target, original_content)
+        _write_integrity_sidecar(skill_dir)
         return {"success": False, "error": scan_error}
 
     result = {
@@ -859,6 +910,13 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name, " Create it first with action='create'.")}
 
+    # Verify integrity before write
+    if not _verify_integrity(existing["path"]):
+        return {
+            "success": False,
+            "error": f"Skill integrity check failed for '{name}'. The skill contents have been modified outside of skill_manage."
+        }
+
     target, err = _resolve_skill_target(existing["path"], file_path)
     if err:
         return {"success": False, "error": err}
@@ -867,6 +925,9 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     original_content = target.read_text(encoding="utf-8") if target.exists() else None
     _atomic_write_text(target, file_content)
 
+    # Write new integrity sidecar
+    _write_integrity_sidecar(existing["path"])
+
     # Security scan — roll back on block
     scan_error = _security_scan_skill(existing["path"])
     if scan_error:
@@ -874,6 +935,7 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
             _atomic_write_text(target, original_content)
         else:
             target.unlink(missing_ok=True)
+        _write_integrity_sidecar(existing["path"])
         return {"success": False, "error": scan_error}
 
     return {
@@ -892,6 +954,13 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": _skill_not_found_error(name)}
+
+    # Verify integrity before remove
+    if not _verify_integrity(existing["path"]):
+        return {
+            "success": False,
+            "error": f"Skill integrity check failed for '{name}'. The skill contents have been modified outside of skill_manage."
+        }
 
     skill_dir = existing["path"]
 
@@ -919,6 +988,9 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
     parent = target.parent
     if parent != skill_dir and parent.exists() and not any(parent.iterdir()):
         parent.rmdir()
+
+    # Update integrity sidecar
+    _write_integrity_sidecar(skill_dir)
 
     return {
         "success": True,

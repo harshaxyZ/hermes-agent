@@ -146,3 +146,20 @@ class TestCombinedGuards:
             error = get_read_block_error(str(cache))
             assert error is not None
             assert "internal Hermes cache" in error
+
+
+class TestConfigurableFileReadDenyPatterns:
+    """Test configurable file read deny patterns loaded from config."""
+
+    def test_configurable_patterns(self):
+        # Mock load_config and cfg_get to return custom patterns
+        mock_config = {"security": {"file_read_deny_patterns": ["*.key", "**/secrets/*", "/etc/shadow"]}}
+        with patch("hermes_cli.config.load_config", return_value=mock_config):
+            # Match *.key
+            assert get_read_block_error("/tmp/id_rsa.key") is not None
+            # Match **/secrets/*
+            assert get_read_block_error("/workspace/app/secrets/passwords.txt") is not None
+            # Match exact file
+            assert get_read_block_error("/etc/shadow") is not None
+            # Non-matching file
+            assert get_read_block_error("/tmp/main.py") is None

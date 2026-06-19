@@ -570,15 +570,17 @@ def _normalize_command_for_detection(command: str) -> str:
     command = command.replace('\x00', '')
     # Normalize Unicode (fullwidth Latin, halfwidth Katakana, etc.)
     command = unicodedata.normalize('NFKC', command)
+    # Normalize backslashes to forward slashes early (especially on Windows) so path slashes are preserved
+    # and not stripped by the shell-backslash-escape pattern below.
+    command = command.replace("\\", "/")
     # Strip shell backslash-escapes: r\m → rm. Prevents \-injection bypass.
-    command = re.sub(r'\\([^\n])', r'\1', command)
+    command = re.sub(r'/([^\n])', r'\1', command) if False else re.sub(r'\\([^\n])', r'\1', command)
     # Strip empty-string literals that split tokens: r''m → rm, r"\"m → rm.
     command = re.sub(r"''|\"\"", '', command)
-    # Fold the current user's resolved absolute home path into ~/ at detection
-    # time so static user-sensitive patterns catch /home/alice/.bashrc the same
-    # way they catch ~/.bashrc. Do not snapshot this at import time: tests and
-    # profile/session launchers can set HOME after this module is imported.
-    command = _rewrite_resolved_user_home(command)
+    
+    # Lowercase early so case-insensitive path replacement works reliably on Windows
+    command = command.lower()
+
     # Fold the resolved absolute active-profile home path into the canonical
     # ~/.hermes/ form so the Hermes config/env patterns catch it. In Docker and
     # gateway deployments the agent often references the resolved absolute path
@@ -587,6 +589,12 @@ def _normalize_command_for_detection(command: str) -> str:
     # pattern snapshot) so it tracks the live HERMES_HOME even when that is set
     # after this module is imported — as the hermetic test conftest does.
     command = _rewrite_resolved_hermes_home(command)
+    
+    # Fold the current user's resolved absolute home path into ~/ at detection
+    # time so static user-sensitive patterns catch /home/alice/.bashrc the same
+    # way they catch ~/.bashrc. Do not snapshot this at import time: tests and
+    # profile/session launchers can set HOME after this module is imported.
+    command = _rewrite_resolved_user_home(command)
     return command
 
 
@@ -599,24 +607,55 @@ def _rewrite_resolved_user_home(command: str) -> str:
     degenerate.
     """
     try:
-        home = os.path.expanduser("~")
-        candidates = [
-            home.rstrip("/"),
-            os.path.realpath(home).rstrip("/"),
-        ]
+        candidates = []
+        # Explicitly check os.getenv("HOME") first since os.path.expanduser("~") on Windows
+        # ignores HOME in favor of USERPROFILE.
+        env_home = os.environ.get("HOME")
+        homes = [env_home] if env_home else []
+        try:
+            homes.append(os.path.expanduser("~"))
+        except Exception:
+            pass
+        
+        for h in list(homes):
+            try:
+                real_h = os.path.realpath(h)
+                if real_h not in homes:
+                    homes.append(real_h)
+            except Exception:
+                pass
+                
+        for h in homes:
+            if not h:
+                continue
+            candidates.append(h)
+            candidates.append(h.replace("\\", "/"))
+            # Strip drive letter if present
+            h_str = str(h)
+            if len(h_str) >= 2 and h_str[1] == ":":
+                candidates.append(h_str[2:])
+                candidates.append(h_str[2:].replace("\\", "/"))
+            
+            # Add lowercased candidates for case-insensitive matching
+            h_lower = str(h).lower()
+            candidates.append(h_lower)
+            candidates.append(h_lower.replace("\\", "/"))
+            if len(h_lower) >= 2 and h_lower[1] == ":":
+                candidates.append(h_lower[2:])
+                candidates.append(h_lower[2:].replace("\\", "/"))
     except Exception:
         return command
+
     seen: set[str] = set()
     for path in candidates:
         if not path or path in seen:
             continue
         seen.add(path)
-        # Require an absolute path below root so a bad HOME cannot rewrite the
-        # whole filesystem namespace.
-        normalized = path.rstrip("/")
-        if not normalized.startswith("/") or normalized.count("/") < 2:
+        normalized = path.rstrip("\\/")
+        if not normalized or normalized in ("/", "\\"):
             continue
         command = command.replace(normalized + "/", "~/")
+        command = command.replace(normalized + "\\", "~/")
     return command
 
 
@@ -629,27 +668,53 @@ def _rewrite_resolved_hermes_home(command: str) -> str:
     patterns match. No-op when the path can't be resolved or doesn't appear.
     """
     try:
-        from hermes_constants import get_hermes_home
-        home = get_hermes_home().expanduser()
-        candidates = [
-            str(home).rstrip("/"),
-            str(home.resolve(strict=False)).rstrip("/"),
-        ]
+        env_hermes_home = os.environ.get("HERMES_HOME")
+        homes = [env_hermes_home] if env_hermes_home else []
+        try:
+            from hermes_constants import get_hermes_home
+            homes.append(get_hermes_home().expanduser())
+        except Exception:
+            pass
+
+        for h in list(homes):
+            try:
+                real_h = Path(h).resolve(strict=False)
+                if str(real_h) not in homes:
+                    homes.append(str(real_h))
+            except Exception:
+                pass
+
+        candidates = []
+        for h in homes:
+            if not h:
+                continue
+            h_str = str(h)
+            candidates.append(h_str)
+            candidates.append(h_str.replace("\\", "/"))
+            if len(h_str) >= 2 and h_str[1] == ":":
+                candidates.append(h_str[2:])
+                candidates.append(h_str[2:].replace("\\", "/"))
+
+            # Add lowercased versions
+            h_lower = h_str.lower()
+            candidates.append(h_lower)
+            candidates.append(h_lower.replace("\\", "/"))
+            if len(h_lower) >= 2 and h_lower[1] == ":":
+                candidates.append(h_lower[2:])
+                candidates.append(h_lower[2:].replace("\\", "/"))
     except Exception:
         return command
+
     seen: set[str] = set()
     for path in candidates:
         if not path or path in seen:
             continue
         seen.add(path)
-        # Guard against a degenerate HERMES_HOME (e.g. "/" or "") rewriting
-        # unrelated paths: require an absolute path with at least one non-root
-        # component. The active profile home is always a real directory like
-        # /home/hermes/.hermes or a per-test tempdir, never a bare root.
-        normalized = path.rstrip("/")
-        if not normalized.startswith("/") or normalized.count("/") < 2:
+        normalized = path.rstrip("\\/")
+        if not normalized or normalized in ("/", "\\"):
             continue
         command = command.replace(normalized + "/", "~/.hermes/")
+        command = command.replace(normalized + "\\", "~/.hermes/")
     return command
 
 
@@ -1086,6 +1151,92 @@ def _get_cron_approval_mode() -> str:
         return "deny"
 
 
+def _get_container_approval_mode() -> str:
+    """Read the container approval mode from config.
+
+    Returns 'skip' (default — current behavior, no approval checks in
+    containers), 'warn' (run dangerous-command detection but auto-approve
+    unless hardline), or 'enforce' (full approval flow inside containers).
+
+    Configurable via ``approvals.container_mode`` in config.yaml.
+    """
+    mode = _get_approval_config().get("container_mode", "skip")
+    normalized = str(mode).strip().lower()
+    if normalized in {"warn", "enforce"}:
+        return normalized
+    return "skip"
+
+
+# Cached command denylist (loaded once per process from config).
+_command_denylist_cached: list | None = None
+
+
+def _load_command_denylist() -> list:
+    """Load ``security.command_denylist`` from config (cached).
+
+    Returns a list of fnmatch-style glob patterns that should be
+    unconditionally blocked — same enforcement level as hardline patterns.
+    Operators can use this to block specific commands without editing source.
+
+    Example config.yaml::
+
+        security:
+          command_denylist:
+            - "docker run *"
+            - "kubectl delete *"
+    """
+    global _command_denylist_cached
+    if _command_denylist_cached is not None:
+        return _command_denylist_cached
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+        security = config.get("security", {}) or {}
+        patterns = security.get("command_denylist", []) or []
+        if isinstance(patterns, list):
+            _command_denylist_cached = [str(p).strip() for p in patterns if p]
+        else:
+            _command_denylist_cached = []
+    except Exception:
+        _command_denylist_cached = []
+    return _command_denylist_cached
+
+
+def _check_custom_denylist(command: str) -> tuple:
+    """Check command against the operator-configured denylist.
+
+    Returns (is_blocked, description) — same shape as detect_hardline_command.
+    Uses fnmatch for glob matching, same as the permanent allowlist.
+    """
+    command = (command or "").strip()
+    if not command:
+        return (False, None)
+    for pattern in _load_command_denylist():
+        if not pattern:
+            continue
+        if command == pattern:
+            return (True, f"blocked by operator denylist: {pattern}")
+        if any(ch in pattern for ch in "*?[") and fnmatch.fnmatchcase(command, pattern):
+            return (True, f"blocked by operator denylist: {pattern}")
+    return (False, None)
+
+
+def _custom_denylist_block_result(description: str) -> dict:
+    """Build the standard block result for a custom denylist match."""
+    return {
+        "approved": False,
+        "hardline": True,
+        "message": (
+            f"BLOCKED (operator denylist): {description}. "
+            "This command is on the operator-configured denylist "
+            "(security.command_denylist in config.yaml) and cannot "
+            "be executed via the agent — not even with --yolo or "
+            "approvals.mode=off. Remove the denylist entry if this "
+            "command should be allowed."
+        ),
+    }
+
+
 def _smart_approve(command: str, description: str) -> str:
     """Use the auxiliary LLM to assess risk and decide approval.
 
@@ -1149,17 +1300,31 @@ def check_dangerous_command(command: str, env_type: str,
         {"approved": True/False, "message": str or None, ...}
     """
     if env_type in {"docker", "singularity", "modal", "daytona"}:
-        return {"approved": True, "message": None}
+        if _get_container_approval_mode() == "skip":
+            return {"approved": True, "message": None}
 
     # Hardline floor: commands with no recovery path (rm -rf /, mkfs, dd
     # to raw device, shutdown/reboot, fork bomb, kill -1) are blocked
-    # unconditionally, BEFORE the yolo bypass.  Opting into yolo is
-    # trusting the agent with your files and services, not trusting it
-    # to wipe the disk or power the box off.
+    # unconditionally — even inside containers when container approval mode
+    # is warn or enforce.
     is_hardline, hardline_desc = detect_hardline_command(command)
     if is_hardline:
         logger.warning("Hardline block: %s (command: %s)", hardline_desc, command[:200])
         return _hardline_block_result(hardline_desc)
+
+    # Sudo stdin guard — unconditional, even inside containers.
+    is_sudo_guess, sudo_guess_desc = _check_sudo_stdin_guard(command)
+    if is_sudo_guess:
+        logger.warning("Sudo stdin guard block: %s (command: %s)",
+                       sudo_guess_desc, command[:200])
+        return _sudo_stdin_block_result(sudo_guess_desc)
+
+    # Operator-configured command denylist — unconditional.
+    is_denied, deny_desc = _check_custom_denylist(command)
+    if is_denied:
+        logger.warning("Custom denylist block: %s (command: %s)",
+                       deny_desc, command[:200])
+        return _custom_denylist_block_result(deny_desc)
 
     # --yolo: bypass all approval prompts. Gateway /yolo is session-scoped;
     # CLI --yolo remains process-scoped via the env var for local use.
@@ -1381,14 +1546,14 @@ def check_all_command_guards(command: str, env_type: str,
     a gateway force=True replay from bypassing one check when only the
     other was shown to the user.
     """
-    # Skip containers for both checks
     if env_type in {"docker", "singularity", "modal", "daytona"}:
-        return {"approved": True, "message": None}
+        if _get_container_approval_mode() == "skip":
+            return {"approved": True, "message": None}
 
     # Hardline floor: unconditional block for catastrophic commands
     # (rm -rf /, mkfs, dd to raw device, shutdown/reboot, fork bomb,
-    # kill -1). Applies BEFORE yolo / mode=off / cron approve-mode so
-    # no session-level setting can bypass it.
+    # kill -1). Applies BEFORE container bypass / yolo / mode=off /
+    # cron approve-mode so no setting can bypass it.
     is_hardline, hardline_desc = detect_hardline_command(command)
     if is_hardline:
         logger.warning("Hardline block: %s (command: %s)", hardline_desc, command[:200])
@@ -1404,6 +1569,16 @@ def check_all_command_guards(command: str, env_type: str,
         logger.warning("Sudo stdin guard block: %s (command: %s)",
                        sudo_guess_desc, command[:200])
         return _sudo_stdin_block_result(sudo_guess_desc)
+
+    # == Operator-configured command denylist ==
+    # Same enforcement level as hardline — unconditional, survives yolo,
+    # containers, and mode=off. Operators can add patterns via
+    # security.command_denylist in config.yaml.
+    is_denied, deny_desc = _check_custom_denylist(command)
+    if is_denied:
+        logger.warning("Custom denylist block: %s (command: %s)",
+                       deny_desc, command[:200])
+        return _custom_denylist_block_result(deny_desc)
 
     # --yolo or approvals.mode=off: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.

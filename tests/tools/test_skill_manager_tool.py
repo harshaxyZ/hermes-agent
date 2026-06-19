@@ -987,7 +987,10 @@ class TestDeleteSkillRmtreeGuard:
         skills = tmp_path / "skills"
         skills.mkdir()
         evil = skills / "evil-skill"
-        evil.symlink_to(victim, target_is_directory=True)
+        try:
+            evil.symlink_to(victim, target_is_directory=True)
+        except OSError:
+            pytest.skip("Symlinks not supported")
         try:
             with patch("tools.skill_manager_tool.SKILLS_DIR", skills), \
                  patch("agent.skill_utils.get_all_skills_dirs", return_value=[skills]), \
@@ -1028,3 +1031,57 @@ class TestDeleteSkillRmtreeGuard:
         assert result["success"] is False
         assert "skills root" in result["error"].lower()
         assert outside.exists()
+
+
+class TestSkillIntegrity:
+    """Verify that skill integrity sidecar files are written and verified correctly."""
+
+    def test_create_writes_integrity_sidecar(self, tmp_path):
+        with _skill_dir(tmp_path):
+            result = _create_skill("integrity-test", VALID_SKILL_CONTENT)
+            assert result["success"] is True
+            assert (tmp_path / "integrity-test" / ".integrity.json").exists()
+
+    def test_edit_verifies_and_updates_integrity(self, tmp_path):
+        with _skill_dir(tmp_path):
+            # Create skill
+            _create_skill("integrity-test", VALID_SKILL_CONTENT)
+            
+            # Edit skill (should succeed and update sidecar)
+            result = _edit_skill("integrity-test", VALID_SKILL_CONTENT_2)
+            assert result["success"] is True
+
+            # Tamper the file directly on disk
+            skill_md = tmp_path / "integrity-test" / "SKILL.md"
+            skill_md.write_text("tampered content")
+
+            # Try to edit again (should fail integrity check)
+            result2 = _edit_skill("integrity-test", VALID_SKILL_CONTENT)
+            assert result2["success"] is False
+            assert "integrity check failed" in result2["error"]
+
+    def test_patch_verifies_and_updates_integrity(self, tmp_path):
+        with _skill_dir(tmp_path):
+            _create_skill("integrity-test", VALID_SKILL_CONTENT)
+            
+            # Tamper the file directly
+            skill_md = tmp_path / "integrity-test" / "SKILL.md"
+            skill_md.write_text("tampered content")
+
+            # Try to patch (should fail integrity check)
+            result = _patch_skill("integrity-test", "Do the thing.", "Do the new thing.")
+            assert result["success"] is False
+            assert "integrity check failed" in result["error"]
+
+    def test_write_file_verifies_and_updates_integrity(self, tmp_path):
+        with _skill_dir(tmp_path):
+            _create_skill("integrity-test", VALID_SKILL_CONTENT)
+
+            # Tamper directly
+            skill_md = tmp_path / "integrity-test" / "SKILL.md"
+            skill_md.write_text("tampered content")
+
+            # Try to write supporting file (should fail)
+            result = _write_file("integrity-test", "references/api.md", "# API")
+            assert result["success"] is False
+            assert "integrity check failed" in result["error"]

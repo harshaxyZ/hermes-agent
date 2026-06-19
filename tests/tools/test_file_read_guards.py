@@ -109,6 +109,13 @@ class TestDevicePathBlocking(unittest.TestCase):
         for path in ("/proc/cpuinfo", "/proc/meminfo", "/proc/uptime", "/proc/version"):
             self.assertFalse(_is_blocked_device(path), f"{path} should not be blocked")
 
+    def test_windows_device_paths_blocked(self):
+        """Verify Windows device paths are blocked correctly."""
+        for dev in ("CON", "PRN", "AUX", "COM1", "COM9", "LPT1", "LPT9", "con.txt", "aux.log", "C:\\dir\\CON.txt", "\\\\.\\CON"):
+            self.assertTrue(_is_blocked_device(dev), f"{dev} should be blocked")
+        for dev in ("NUL", "COM10", "LPT10", "con_test.txt", "C:\\dir\\con_test.txt"):
+            self.assertFalse(_is_blocked_device(dev), f"{dev} should not be blocked")
+
     def test_normal_files_not_blocked(self):
         self.assertFalse(_is_blocked_device("/tmp/test.py"))
         self.assertFalse(_is_blocked_device("/home/user/.bashrc"))

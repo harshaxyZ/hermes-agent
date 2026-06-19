@@ -288,6 +288,25 @@ def get_read_block_error(path: str) -> Optional[str]:
             "(Defense-in-depth — not a security boundary; the terminal tool can still bypass.)"
         )
 
+    # Configurable deny patterns from security.file_read_deny_patterns in config.yaml
+    try:
+        from hermes_cli.config import load_config, cfg_get
+        cfg = load_config()
+        deny_patterns = cfg_get(cfg, "security", "file_read_deny_patterns", default=[])
+        if deny_patterns:
+            import fnmatch
+            for pattern in deny_patterns:
+                pattern_lower = pattern.lower()
+                if (fnmatch.fnmatch(str(resolved).lower(), pattern_lower) or 
+                    fnmatch.fnmatch(resolved.name.lower(), pattern_lower) or
+                    fnmatch.fnmatch(path.lower(), pattern_lower)):
+                    return (
+                        f"Access denied: {path} matches security.file_read_deny_patterns. "
+                        "(Defense-in-depth — not a security boundary; the terminal tool can still bypass.)"
+                    )
+    except Exception:
+        pass
+
     return None
 
 

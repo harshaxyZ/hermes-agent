@@ -780,6 +780,8 @@ def content_hash(skill_path: Path) -> str:
             if f.is_file():
                 try:
                     rel = f.relative_to(skill_path).as_posix()
+                    if rel == ".integrity.json":
+                        continue
                     h.update(rel.encode("utf-8"))
                     h.update(b"\x00")
                     h.update(f.read_bytes())

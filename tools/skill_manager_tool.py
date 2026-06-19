@@ -114,7 +114,16 @@ def _verify_integrity(skill_dir: Path) -> bool:
     """Verify that the skill's content hash matches its .integrity.json sidecar."""
     integrity_file = skill_dir / ".integrity.json"
     if not integrity_file.exists():
-        # Allow missing integrity file for backward compatibility
+        # Secure default for user skills: enforce integrity sidecar.
+        # Attackers could otherwise delete the sidecar to bypass the hash check.
+        # Built-in skills (outside ~/.hermes/skills) don't have sidecars and are trusted.
+        try:
+            from hermes_constants import get_hermes_home
+            skills_root = get_hermes_home() / "skills"
+            if str(skills_root.resolve()) in str(skill_dir.resolve()):
+                return False
+        except Exception:
+            pass
         return True
     try:
         data = json.loads(integrity_file.read_text(encoding="utf-8"))
